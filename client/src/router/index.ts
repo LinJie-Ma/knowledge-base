@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { LOGIN_STAGE2_VARIANT } from '../config/loginStage2'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -21,7 +22,9 @@ const router = createRouter({
     {
       path: '/unlock',
       name: 'Unlock',
-      component: () => import('../views/LoginStage2.vue'),
+      component: LOGIN_STAGE2_VARIANT === 'cyberRed'
+        ? () => import('../views/LoginStage2.vue')
+        : () => import('../views/LoginStage2Particle.vue'),
     },
     {
       path: '/dashboard',
