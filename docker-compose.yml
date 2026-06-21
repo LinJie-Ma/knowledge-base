@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      args:
+        SR_DIST_DIR: ${SR_DIST_DIR:-.sr-dummy}
     ports:
       - "80:80"
     volumes:
@@ -12,6 +14,21 @@ services:
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
       - ADMIN_MNEMONIC=${ADMIN_MNEMONIC:-apple banana cherry delta echo}
+    restart: unless-stopped
+
+  sr-api:
+    build:
+      context: ${SR_BACKEND_DIR:-.sr-dummy}
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=${SR_DATABASE_URL:-sqlite+aiosqlite:///./data/sr.db}
+      - CELERY_BROKER_URL=${SR_CELERY_BROKER_URL:-redis://redis:6379/0}
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
     restart: unless-stopped
 
 volumes:

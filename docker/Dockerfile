@@ -22,6 +22,10 @@ COPY server/ ./
 # Copy client build
 COPY --from=client-build /app/client/dist /app/client/dist
 
+# Copy sugar futures frontend dist (optional build arg)
+ARG SR_DIST_DIR
+COPY ${SR_DIST_DIR:-.sr-dummy} /app/sr-client/dist
+
 # Copy nginx config
 WORKDIR /app
 COPY docker/nginx.conf /etc/nginx/http.d/default.conf
