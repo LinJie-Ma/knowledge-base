@@ -33,7 +33,7 @@ const apps = [
     name: '白糖期货',
     description: '白糖期货数据追踪、分析与交易辅助系统',
     icon: '📈',
-    url: '/sugar-futures',
+    url: '/SR',
   },
 ]
 
