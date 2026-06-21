@@ -1,9 +1,17 @@
-<!-- ===== particle (科幻粒子) · InstancedMesh Spheres ===== -->
+<!-- ===== particle (物理粒子) · InstancedMesh Spheres ===== -->
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import * as THREE from 'three'
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { useMnemonicAuth } from '../composables/useMnemonicAuth'
+import {
+  BALL_COUNT,
+  generateRadius,
+  updatePhysics,
+  updateAttractors,
+  mouseState,
+} from '../utils/particlePhysics'
+import type { Ball } from '../utils/particlePhysics'
 
 const { auth, handleUnlock } = useMnemonicAuth()
 
@@ -43,178 +51,243 @@ function onWordKeydown(idx: number, e: KeyboardEvent) {
   if (e.key === 'Enter' && !submitting.value) onSubmit()
 }
 
-// ---- Three.js InstancedMesh particles ----
+// ---- Three.js physics-driven particles ----
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
-let camera: THREE.PerspectiveCamera | null = null
-let controls: OrbitControls | null = null
-let instancedMesh: THREE.InstancedMesh | null = null
-let material: THREE.ShaderMaterial | null = null
+let camera: THREE.OrthographicCamera | null = null
+let whiteMesh: THREE.InstancedMesh | null = null
+let grayMesh: THREE.InstancedMesh | null = null
+let whiteDummy: THREE.Object3D | null = null
+let grayDummy: THREE.Object3D | null = null
+let whiteMat: THREE.MeshStandardMaterial | null = null
+let grayMat: THREE.MeshStandardMaterial | null = null
+let envTexture: THREE.Texture | null = null
+let attractorMeshes: THREE.Mesh[] = []
+let balls: Ball[] = []
+let whiteBalls: number[] = []
+let grayBalls: number[] = []
 let rafId = 0
 
-/** 3D 高斯分布：密度在原点最高，向外指数衰减 */
-function gaussian3D(maxRadius: number): [number, number, number] {
-  // 球面均匀随机方向
-  const u = 2 * Math.random() - 1
-  const theta = Math.acos(u)
-  const phi = Math.random() * Math.PI * 2
-  // 半径：pow 使粒子集中在中心
-  const r = Math.pow(Math.random(), 2.5) * maxRadius
-  return [
-    Math.sin(theta) * Math.cos(phi) * r,
-    Math.sin(theta) * Math.sin(phi) * r,
-    Math.cos(theta) * r,
-  ]
-}
+// Store event handler refs for cleanup
+let _onMouseMove: ((e: MouseEvent) => void) | null = null
+let _onMouseLeave: (() => void) | null = null
+let _onResize: (() => void) | null = null
 
 function initParticles() {
-  const canvas = canvasRef.value; if (!canvas) return
-  const N = 8000 // InstancedMesh 性能优于 Points，8000 球体可流畅运行
+  const canvas = canvasRef.value!
+  const frustumSize = 18
+  const aspect = canvas.clientWidth / canvas.clientHeight
 
-  // ---- 场景 & 相机 & 渲染器 ----
-  scene = new THREE.Scene()
-  camera = new THREE.PerspectiveCamera(50, canvas.clientWidth / canvas.clientHeight, 0.1, 100)
-  camera.position.set(0, 0.2, 8)
-
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' })
+  // Renderer
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
   renderer.setSize(canvas.clientWidth, canvas.clientHeight, false)
-  renderer.setClearColor(0x050505, 1)
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1.4
 
-  // ---- OrbitControls：拖拽旋转 + 缩放 + 自动旋转 ----
-  controls = new OrbitControls(camera, renderer.domElement)
-  controls.enableDamping = true; controls.dampingFactor = 0.08
-  controls.autoRotate = true; controls.autoRotateSpeed = 0.3
-  controls.minDistance = 3; controls.maxDistance = 18
-  controls.target.set(0, 0, 0)
-  controls.update()
+  // Scene
+  scene = new THREE.Scene()
+  scene.background = new THREE.Color(0x060608)
 
-  // ---- 球体几何体：低面数保持球形轮廓 ----
-  const sphereRadius = 0.09
-  const geo = new THREE.SphereGeometry(sphereRadius, 10, 8)
+  // Camera — Orthographic
+  camera = new THREE.OrthographicCamera(
+    frustumSize * aspect / -2,
+    frustumSize * aspect / 2,
+    frustumSize / 2,
+    frustumSize / -2,
+    0.1, 100
+  )
+  camera.position.set(0, 0, 18)
+  camera.lookAt(0, 0, 0)
 
-  // ---- 自定义 ShaderMaterial：柔和辉光 + 3D 球体着色 ----
-  const vs = [
-    'varying vec3 vNormal;',
-    'varying vec3 vViewPos;',
-    'varying float vScale;',
-    'uniform float uTime;',
-    'void main() {',
-    '  vec4 mvPos = modelViewMatrix * instanceMatrix * vec4(position, 1.0);',
-    '  vViewPos = mvPos.xyz;',
-    '  mat3 normMat = mat3(transpose(inverse(modelViewMatrix * instanceMatrix)));',
-    '  vNormal = normalize(normMat * normal);',
-    // 从 instanceMatrix 提取缩放
-    '  vScale = length(instanceMatrix[0].xyz);',
-    '  gl_Position = projectionMatrix * mvPos;',
-    '}',
-  ].join('\n')
+  // RoomEnvironment
+  const pmremGenerator = new THREE.PMREMGenerator(renderer)
+  const environment = new RoomEnvironment()
+  envTexture = pmremGenerator.fromScene(environment).texture
+  environment.dispose()
+  pmremGenerator.dispose()
 
-  const fs = [
-    'precision highp float;',
-    'varying vec3 vNormal;',
-    'varying vec3 vViewPos;',
-    'varying float vScale;',
-    'uniform float uTime;',
-    'void main() {',
-    // 球体法线着色：朝向相机的面更亮
-    '  vec3 viewDir = normalize(-vViewPos);',
-    '  float NdotV = abs(dot(vNormal, viewDir));',
-    // 菲涅尔：边缘微亮，模拟逆光散射
-    '  float fresnel = pow(1.0 - NdotV, 2.5);',
-    // 基础漫反射：法线朝前 = 亮面
-    '  float diffuse = NdotV * 0.55 + 0.45;',
-    // 大粒子更亮
-    '  float sizeBoost = 0.7 + 0.3 * vScale;',
-    // 综合亮度
-    '  float lum = (diffuse + fresnel * 0.25) * sizeBoost;',
-    // 暖白颜色
-    '  vec3 col = vec3(0.98, 0.97, 0.94) * lum;',
-    // 中心不透明 → 边缘微透，产生柔和融入感
-    '  float alpha = NdotV * 0.7 + 0.3 + fresnel * 0.15;',
-    '  alpha = clamp(alpha * sizeBoost, 0.4, 1.0);',
-    '  gl_FragColor = vec4(col, alpha);',
-    '}',
-  ].join('\n')
+  // Lights
+  scene.add(new THREE.AmbientLight(0x8899cc, 1.0))
+  const topLight = new THREE.DirectionalLight(0xffffff, 5.0)
+  topLight.position.set(0, 14, 0)
+  scene.add(topLight)
+  const frontLight = new THREE.DirectionalLight(0x99bbff, 2.0)
+  frontLight.position.set(0, 0, 14)
+  scene.add(frontLight)
 
-  material = new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 } },
-    vertexShader: vs,
-    fragmentShader: fs,
+  // Ball physics data
+  function makeBall(radius: number) {
+    const spreadR = 3.0 + Math.random() * 2.5
+    const theta = Math.random() * Math.PI * 2
+    const phi = Math.acos(2 * Math.random() - 1)
+    const r = Math.pow(Math.random(), 0.5) * spreadR
+    balls.push({
+      radius,
+      x: r * Math.sin(phi) * Math.cos(theta),
+      y: r * Math.sin(phi) * Math.sin(theta),
+      z: r * Math.cos(phi) * 0.4,
+      vx: (Math.random() - 0.5) * 1.5,
+      vy: (Math.random() - 0.5) * 1.5,
+      vz: (Math.random() - 0.5) * 0.8,
+      birthTime: Math.random() * 20,
+      lifespan: 8 + Math.random() * 12,
+      _scale: 1.0,
+      _opacity: 1.0,
+      _targetX: (Math.random() - 0.5) * 4.0,
+      _targetY: (Math.random() - 0.5) * 4.0,
+      _targetZ: (Math.random() - 0.5) * 2.0,
+      _nextTargetTime: Math.random() * 3.0,
+    })
+  }
+
+  for (let i = 0; i < BALL_COUNT; i++) {
+    makeBall(generateRadius())
+  }
+
+  // Split white/gray
+  const WHITE_THRESHOLD = 0.18
+  for (let i = 0; i < balls.length; i++) {
+    if (balls[i].radius > WHITE_THRESHOLD) {
+      whiteBalls.push(i)
+    } else {
+      grayBalls.push(i)
+    }
+  }
+
+  // White InstancedMesh
+  const whiteGeo = new THREE.SphereGeometry(1, 20, 20)
+  whiteMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.08,
+    metalness: 0.0,
+    envMap: envTexture,
+    envMapIntensity: 1.2,
+    emissive: 0x222222,
+    emissiveIntensity: 0.5,
     transparent: true,
-    depthWrite: true,
-    depthTest: true,
+    opacity: 0.9,
+    depthWrite: false,
     blending: THREE.AdditiveBlending,
   })
+  whiteMesh = new THREE.InstancedMesh(whiteGeo, whiteMat, whiteBalls.length)
+  whiteDummy = new THREE.Object3D()
+  scene.add(whiteMesh)
 
-  // ---- InstancedMesh ----
-  instancedMesh = new THREE.InstancedMesh(geo, material, N)
-  instancedMesh.castShadow = false
-  instancedMesh.receiveShadow = false
+  // Gray InstancedMesh
+  const grayGeo = new THREE.SphereGeometry(1, 12, 12)
+  grayMat = new THREE.MeshStandardMaterial({
+    color: 0x999999,
+    roughness: 0.15,
+    metalness: 0.0,
+    envMap: envTexture,
+    envMapIntensity: 0.6,
+    emissive: 0x060606,
+    emissiveIntensity: 0.15,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  })
+  grayMesh = new THREE.InstancedMesh(grayGeo, grayMat, grayBalls.length)
+  grayDummy = new THREE.Object3D()
+  scene.add(grayMesh)
 
-  const dummy = new THREE.Object3D()
-  const quat = new THREE.Quaternion()
-  const color = new THREE.Color()
-
-  for (let i = 0; i < N; i++) {
-    const [x, y, z] = gaussian3D(4.5)
-    dummy.position.set(x, y, z)
-    // 随机大小：0.5 ~ 2.5 倍球体半径
-    const s = 0.5 + Math.random() * 2.0
-    dummy.scale.setScalar(s)
-    dummy.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI)
-    dummy.updateMatrix()
-    instancedMesh.setMatrixAt(i, dummy.matrix)
-    // 大粒子更暖白，小粒子偏灰
-    const brightness = 0.55 + s * 0.18
-    color.setRGB(brightness, brightness * 0.98, brightness * 0.94)
-    instancedMesh.setColorAt(i, color)
+  // Attractor debug dots
+  attractorMeshes = []
+  for (let i = 0; i < 2; i++) {
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.08, 8, 8),
+      new THREE.MeshBasicMaterial({
+        color: [0xff4444, 0x44ff88][i],
+        transparent: true,
+        opacity: 0.3,
+      })
+    )
+    scene.add(dot)
+    attractorMeshes.push(dot)
   }
-  instancedMesh.instanceMatrix.needsUpdate = true
-  if (instancedMesh.instanceColor) instancedMesh.instanceColor.needsUpdate = true
 
-  scene.add(instancedMesh)
-
-  // ---- 环境光源感：背景微弱的点光源群（额外氛围） ----
-  const bgGeo = new THREE.SphereGeometry(0.04, 6, 4)
-  const bgMat = new THREE.MeshBasicMaterial({ color: 0x333322, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false })
-  const bgMesh = new THREE.InstancedMesh(bgGeo, bgMat, 2000)
-  for (let i = 0; i < 2000; i++) {
-    const [x, y, z] = gaussian3D(6.0)
-    dummy.position.set(x, y, z)
-    dummy.scale.setScalar(0.5 + Math.random() * 0.8)
-    dummy.updateMatrix()
-    bgMesh.setMatrixAt(i, dummy.matrix)
+  // Mouse
+  _onMouseMove = (e: MouseEvent) => {
+    mouseState.inScene = true
+    const a = window.innerWidth / window.innerHeight
+    mouseState.x = ((e.clientX / window.innerWidth) * 2 - 1) * frustumSize * a / 2
+    mouseState.y = (-(e.clientY / window.innerHeight) * 2 + 1) * frustumSize / 2
   }
-  bgMesh.instanceMatrix.needsUpdate = true
-  scene.add(bgMesh)
+  _onMouseLeave = () => { mouseState.inScene = false }
+  window.addEventListener('mousemove', _onMouseMove)
+  window.addEventListener('mouseleave', _onMouseLeave)
 
-  // ---- 动画循环 ----
+  // Resize
+  _onResize = () => {
+    const c = canvasRef.value
+    if (!c || !renderer || !camera) return
+    renderer.setSize(c.clientWidth, c.clientHeight, false)
+    const a = c.clientWidth / c.clientHeight
+    camera.left = frustumSize * a / -2
+    camera.right = frustumSize * a / 2
+    camera.updateProjectionMatrix()
+  }
+  window.addEventListener('resize', _onResize)
+
+  // Animate loop
+  const clock = new THREE.Clock()
   function animate() {
     rafId = requestAnimationFrame(animate)
-    controls?.update()
-    if (material) material.uniforms.uTime.value = performance.now() * 0.001
+    const dt = Math.min(clock.getDelta(), 0.033)
+    const elapsed = clock.elapsedTime
+
+    const attractors = updateAttractors(elapsed)
+    for (let i = 0; i < 2; i++) {
+      attractorMeshes[i].position.set(attractors[i].x, attractors[i].y, attractors[i].z)
+    }
+
+    updatePhysics(balls, dt, elapsed, attractors)
+
+    // Sync white balls
+    for (let i = 0; i < whiteBalls.length; i++) {
+      const idx = whiteBalls[i]
+      const b = balls[idx]
+      whiteDummy!.position.set(b.x, b.y, b.z)
+      whiteDummy!.scale.setScalar(Math.max(b.radius * b._scale, 0.005))
+      whiteDummy!.updateMatrix()
+      whiteMesh!.setMatrixAt(i, whiteDummy!.matrix)
+    }
+    whiteMesh!.instanceMatrix.needsUpdate = true
+
+    // Sync gray balls
+    for (let i = 0; i < grayBalls.length; i++) {
+      const idx = grayBalls[i]
+      const b = balls[idx]
+      grayDummy!.position.set(b.x, b.y, b.z)
+      grayDummy!.scale.setScalar(Math.max(b.radius * b._scale, 0.005))
+      grayDummy!.updateMatrix()
+      grayMesh!.setMatrixAt(i, grayDummy!.matrix)
+    }
+    grayMesh!.instanceMatrix.needsUpdate = true
+
     renderer!.render(scene!, camera!)
   }
   animate()
-
-  window.addEventListener('resize', onResize)
-}
-
-function onResize() {
-  const c = canvasRef.value; if (!c || !renderer || !camera) return
-  renderer.setSize(c.clientWidth, c.clientHeight, false)
-  camera.aspect = c.clientWidth / c.clientHeight
-  camera.updateProjectionMatrix()
 }
 
 function cleanup() {
   cancelAnimationFrame(rafId)
-  window.removeEventListener('resize', onResize)
-  controls?.dispose()
-  instancedMesh?.geometry.dispose()
-  material?.dispose()
+  if (_onResize) window.removeEventListener('resize', _onResize)
+  if (_onMouseMove) window.removeEventListener('mousemove', _onMouseMove)
+  if (_onMouseLeave) window.removeEventListener('mouseleave', _onMouseLeave)
+
+  whiteMesh?.geometry.dispose()
+  whiteMat?.dispose()
+  grayMesh?.geometry.dispose()
+  grayMat?.dispose()
+  attractorMeshes.forEach(m => {
+    m.geometry.dispose()
+    ;(m.material as THREE.Material).dispose()
+  })
+  envTexture?.dispose()
   renderer?.dispose()
 }
 
@@ -241,7 +314,7 @@ onUnmounted(cleanup)
 
       <div class="t-line t-label">$ Enter 5-word for identity verification:</div>
       <div class="t-line t-word-row">
-        <span class="t-prompt">></span>
+        <span class="t-prompt">&gt;</span>
         <template v-for="(_, i) in WORD_COUNT" :key="i">
           <span class="t-tag">WORD_{{ i + 1 }}</span>
           <input
@@ -262,7 +335,7 @@ onUnmounted(cleanup)
       <div v-if="auth.error" class="t-line t-err">[ERR]  {{ auth.error }}</div>
 
       <div class="t-line t-action" @click="!submitting && onSubmit()">
-        <span class="t-prompt">></span>
+        <span class="t-prompt">&gt;</span>
         <span v-if="submitting" class="t-cmd t-blink">EXECUTING_AUTH<span class="t-cursor">_</span></span>
         <span v-else class="t-cmd">EXECUTE_AUTH<span class="t-cursor">_</span></span>
         <span class="t-hint ml-2">[ENTER]</span>
