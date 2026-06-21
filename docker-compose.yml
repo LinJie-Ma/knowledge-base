@@ -1,4 +1,7 @@
 services:
+  # ============================================================
+  # MAIN LJ — 主项目 (Nginx + Express)
+  # ============================================================
   hub:
     build:
       context: .
@@ -16,20 +19,84 @@ services:
       - ADMIN_MNEMONIC=${ADMIN_MNEMONIC:-apple banana cherry delta echo}
     restart: unless-stopped
 
+  # ============================================================
+  # 白糖期货子系统 (SR)
+  # ============================================================
+  sr-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sugar_sentiment
+      POSTGRES_USER: sugar
+      POSTGRES_PASSWORD: ${SR_DB_PASSWORD:-sugar_prod}
+    volumes:
+      - sr-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sugar -d sugar_sentiment"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+  sr-redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
   sr-api:
     build:
       context: ${SR_BACKEND_DIR:-.sr-dummy}
       dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment:
-      - DATABASE_URL=${SR_DATABASE_URL:-sqlite+aiosqlite:///./data/sr.db}
-      - CELERY_BROKER_URL=${SR_CELERY_BROKER_URL:-redis://redis:6379/0}
+      DATABASE_URL: postgresql+asyncpg://sugar:${SR_DB_PASSWORD:-sugar_prod}@sr-db:5432/sugar_sentiment
+      DATABASE_URL_SYNC: postgresql://sugar:${SR_DB_PASSWORD:-sugar_prod}@sr-db:5432/sugar_sentiment
+      REDIS_URL: redis://sr-redis:6379/0
+      CELERY_BROKER_URL: redis://sr-redis:6379/0
+    depends_on:
+      sr-db:
+        condition: service_healthy
+      sr-redis:
+        condition: service_healthy
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
+  sr-worker:
+    build:
+      context: ${SR_BACKEND_DIR:-.sr-dummy}
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sugar:${SR_DB_PASSWORD:-sugar_prod}@sr-db:5432/sugar_sentiment
+      DATABASE_URL_SYNC: postgresql://sugar:${SR_DB_PASSWORD:-sugar_prod}@sr-db:5432/sugar_sentiment
+      REDIS_URL: redis://sr-redis:6379/0
+      CELERY_BROKER_URL: redis://sr-redis:6379/0
+    depends_on:
+      sr-db:
+        condition: service_healthy
+      sr-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sr-beat:
+    build:
+      context: ${SR_BACKEND_DIR:-.sr-dummy}
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sugar:${SR_DB_PASSWORD:-sugar_prod}@sr-db:5432/sugar_sentiment
+      DATABASE_URL_SYNC: postgresql://sugar:${SR_DB_PASSWORD:-sugar_prod}@sr-db:5432/sugar_sentiment
+      REDIS_URL: redis://sr-redis:6379/0
+      CELERY_BROKER_URL: redis://sr-redis:6379/0
+    depends_on:
+      sr-db:
+        condition: service_healthy
+      sr-redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   hub-data:
+  sr-pgdata:
