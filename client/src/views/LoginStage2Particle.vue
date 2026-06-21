@@ -157,38 +157,26 @@ function initParticles() {
   }
 
   // White InstancedMesh
-  const whiteGeo = new THREE.SphereGeometry(1, 20, 20)
+  const whiteGeo = new THREE.SphereGeometry(1, 32, 32)
   whiteMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
-    roughness: 0.08,
-    metalness: 0.0,
+    roughness: 0.15,
+    metalness: 0.05,
     envMap: envTexture,
-    envMapIntensity: 1.2,
-    emissive: 0x222222,
-    emissiveIntensity: 0.5,
-    transparent: true,
-    opacity: 0.9,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    envMapIntensity: 0.8,
   })
   whiteMesh = new THREE.InstancedMesh(whiteGeo, whiteMat, whiteBalls.length)
   whiteDummy = new THREE.Object3D()
   scene.add(whiteMesh)
 
   // Gray InstancedMesh
-  const grayGeo = new THREE.SphereGeometry(1, 12, 12)
+  const grayGeo = new THREE.SphereGeometry(1, 24, 24)
   grayMat = new THREE.MeshStandardMaterial({
-    color: 0x999999,
-    roughness: 0.15,
-    metalness: 0.0,
+    color: 0xcccccc,
+    roughness: 0.3,
+    metalness: 0.1,
     envMap: envTexture,
-    envMapIntensity: 0.6,
-    emissive: 0x060606,
-    emissiveIntensity: 0.15,
-    transparent: true,
-    opacity: 0.5,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    envMapIntensity: 0.5,
   })
   grayMesh = new THREE.InstancedMesh(grayGeo, grayMat, grayBalls.length)
   grayDummy = new THREE.Object3D()
@@ -359,7 +347,7 @@ onUnmounted(cleanup)
 .cli-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: 0; }
 
 .crt-scanlines {
-  position: fixed; inset: 0; z-index: 3;
+  position: fixed; inset: 0; z-index: -1;
   background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.06) 2px, rgba(0,0,0,0.06) 4px);
   pointer-events: none;
 }
